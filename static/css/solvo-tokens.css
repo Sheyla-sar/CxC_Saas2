@@ -1,0 +1,142 @@
+/* Solvo · tokens de identidad v1.0
+   Oscuro por defecto. Claro: <html data-tema="claro"> (o cualquier contenedor).
+   Solo CSS: sin imágenes, sin dependencias. Las fuentes van locales (ver @font-face). */
+
+@font-face{font-family:"Syne";src:url("/fonts/Syne.ttf") format("truetype");font-weight:400 800;font-display:swap}
+@font-face{font-family:"Instrument Sans";src:url("/fonts/InstrumentSans.ttf") format("truetype");font-weight:400 700;font-stretch:75% 100%;font-display:swap}
+@font-face{font-family:"JetBrains Mono";src:url("/fonts/JetBrainsMono.ttf") format("truetype");font-weight:100 800;font-display:swap}
+
+:root,
+[data-tema="oscuro"]{
+  color-scheme:dark;
+  /* tipografía */
+  --f-display:"Syne",sans-serif;               /* titulares, cifras grandes, logotipo */
+  --f-texto:"Instrument Sans",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,monospace; /* etiquetas, estados, tablas, importes */
+
+  /* superficies */
+  --hoja:#030307;           /* fondo de láminas / presentación */
+  --fondo:#07070D;          /* Medianoche */
+  --fondo-2:#0C0C16;
+  --vidrio:linear-gradient(160deg,rgba(255,255,255,.085),rgba(255,255,255,.025));
+  --vidrio-borde-1:rgba(255,255,255,.38);   /* borde degradado de 1px, arranque */
+  --vidrio-borde-2:rgba(150,135,255,.14);   /* borde degradado de 1px, final */
+  --vidrio-blur:22px;
+  --dock:linear-gradient(170deg,rgba(255,255,255,.10),rgba(255,255,255,.03));
+  --linea:rgba(255,255,255,.09);
+  --linea-fuerte:rgba(255,255,255,.19);
+  --campo:rgba(255,255,255,.04);
+  --pista:rgba(255,255,255,.07);
+  --velo:rgba(4,4,10,.72);
+
+  /* texto */
+  --texto:#F4F4FA;
+  --texto-2:#9494AE;
+  --texto-3:#63637E;
+
+  /* acento */
+  --acento:#6C5CFF;                      /* Violeta Solvo */
+  --acento-2:#8B5CFF;                    /* Violeta luz */
+  --acento-grad:linear-gradient(135deg,#6C5CFF,#8B5CFF);
+  --acento-texto:#B3A9FF;
+  --acento-suave:rgba(108,92,255,.18);
+  --relleno:linear-gradient(150deg,#5B3DFF 0%,#3A23D8 100%);  /* bloque activo, tarjetas de cifra */
+  --relleno-tinta:#FFFFFF;
+  --titular:linear-gradient(90deg,#D3CDFF,#9A8BFF 50%,#6C8CFF); /* palabra clave del titular */
+
+  /* logotipo */
+  --logo-1:#9A6BFF;
+  --logo-2:#5B3DFF;
+  --logo-grad:linear-gradient(135deg,var(--logo-1),var(--logo-2));
+  --logo-tinta:#FFFFFF;
+
+  /* banda de color (una por pantalla, a ancho completo) */
+  --banda:#4B2BFF;                       /* Banda violeta */
+  --banda-tinta:#FFFFFF;
+  --banda-tinta-2:rgba(255,255,255,.72);
+  --banda-linea:rgba(255,255,255,.24);
+  --banda-boton:#FFFFFF;
+  --banda-boton-tinta:#0B0B14;
+
+  /* estados: siempre texto mono con "/" y regla lateral de 2px, nunca píldoras */
+  --vencida:#FF6B5E;                     /* Coral */
+  --por-vencer:#F5B544;                  /* Ámbar */
+  --al-dia:#3FD1B5;                      /* Turquesa */
+  --vencida-banda:#FFB3AA;  --por-vencer-banda:#FFD88F;  --al-dia-banda:#8FF3DD;
+  --vencida-suave:rgba(255,107,94,.10);  --por-vencer-suave:rgba(245,181,68,.10);  --al-dia-suave:rgba(63,209,181,.10);
+
+  /* forma */
+  --r-boton:4px;            /* botones planos, siempre rectangulares */
+  --r-tabla:16px;
+  --r-tarjeta:24px;
+  --r-hero:28px;
+  --sombra:0 40px 90px rgba(0,0,0,.6);
+  --luz:radial-gradient(560px 560px at 90% 16%,rgba(108,92,255,.32),transparent 70%),radial-gradient(700px 700px at 4% 46%,rgba(43,59,255,.24),transparent 70%),radial-gradient(620px 620px at 96% 80%,rgba(139,92,255,.22),transparent 70%); /* resplandor de fondo, capa fija detrás del contenido */
+}
+
+[data-tema="claro"]{
+  color-scheme:light;
+  --hoja:#E4E4EE;
+  --fondo:#F6F6FB;          /* Hielo */
+  --fondo-2:#FFFFFF;
+  --vidrio:linear-gradient(160deg,rgba(255,255,255,.96),rgba(255,255,255,.66));
+  --vidrio-borde-1:#FFFFFF;
+  --vidrio-borde-2:rgba(75,60,240,.20);
+  --dock:linear-gradient(170deg,rgba(255,255,255,.92),rgba(255,255,255,.6));
+  --linea:rgba(11,11,20,.09);
+  --linea-fuerte:rgba(11,11,20,.2);
+  --campo:rgba(11,11,20,.03);
+  --pista:rgba(11,11,20,.07);
+  --velo:rgba(235,235,247,.7);
+
+  --texto:#0B0B14;
+  --texto-2:#60607A;
+  --texto-3:#9A9AB2;
+
+  --acento:#4B3CF0;
+  --acento-2:#6A4DFF;
+  --acento-grad:linear-gradient(135deg,#3F37F5,#6A4DFF);
+  --acento-texto:#3A2FD0;
+  --acento-suave:rgba(75,60,240,.10);
+  --relleno:linear-gradient(150deg,#2B47FF 0%,#1530D8 100%);
+  --relleno-tinta:#FFFFFF;
+  --titular:linear-gradient(90deg,#1F3DFF,#7A4DFF);
+
+  --logo-1:#6A4DFF;
+  --logo-2:#2B3BFF;
+  --logo-tinta:#07070D;
+
+  --banda:#1F3DFF;                       /* Azul eléctrico */
+  --banda-tinta-2:rgba(255,255,255,.78);
+  --banda-linea:rgba(255,255,255,.3);
+
+  --vencida:#D9453A;
+  --por-vencer:#B97A0A;
+  --al-dia:#0E8F7A;
+  --vencida-banda:#FFC2BA;  --por-vencer-banda:#FFE0A0;  --al-dia-banda:#9BF5E0;
+  --vencida-suave:rgba(217,69,58,.07);  --por-vencer-suave:rgba(185,122,10,.08);  --al-dia-suave:rgba(14,143,122,.07);
+
+  --sombra:0 40px 80px rgba(31,61,255,.18);
+  --luz:radial-gradient(560px 560px at 90% 16%,rgba(122,104,255,.20),transparent 70%),radial-gradient(700px 700px at 2% 50%,rgba(31,61,255,.10),transparent 70%),radial-gradient(620px 620px at 98% 82%,rgba(122,104,255,.16),transparent 70%);
+}
+
+/* Constantes de marca (iguales en ambos modos) */
+:root{
+  --banda-violeta:#4B2BFF;
+  --banda-azul:#1F3DFF;
+  --medianoche:#07070D;
+  --hielo:#F6F6FB;
+  --glow-banda:radial-gradient(620px 460px at 94% 62%,rgba(170,130,255,.42),transparent 68%),radial-gradient(900px 480px at 74% 24%,rgba(255,255,255,.20),transparent 62%);
+}
+
+/* Utilidades mínimas de la identidad */
+.sv-estado{font:500 11px/1 var(--f-mono);letter-spacing:.14em;text-transform:uppercase;padding-left:10px;box-shadow:inset 2px 0 0 currentColor}
+.sv-estado::before{content:"/ "}
+.sv-estado.vencida{color:var(--vencida)} .sv-estado.por-vencer{color:var(--por-vencer)} .sv-estado.al-dia{color:var(--al-dia)} .sv-estado.pagada{color:var(--texto-2)}
+.sv-boton{font:600 13px/1 var(--f-texto);height:40px;padding:0 18px;border-radius:var(--r-boton);border:1px solid var(--linea-fuerte);background:transparent;color:var(--texto)}
+.sv-boton.primario{background:var(--acento-grad);border-color:transparent;color:#fff}
+.sv-logo-mark{background:var(--logo-grad)}
+.sv-titular{font:400 56px/1 var(--f-display);letter-spacing:-.04em}
+.sv-titular em{font-style:normal;font-weight:800;background:var(--titular);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sv-cifra{font:800 72px/1 var(--f-display);letter-spacing:-.035em;font-variant-numeric:tabular-nums}
+.sv-etiqueta{font:500 11px/1 var(--f-mono);letter-spacing:.16em;text-transform:uppercase;color:var(--texto-2)}

@@ -1,0 +1,41 @@
+# Solo PostgreSQL para desarrollo. La aplicación corre fuera del contenedor con `go run .`.
+#
+# Dos roles:
+#   postgres  superusuario del contenedor, solo para administración manual.
+#   cxc_app   rol de la aplicación, SIN superusuario ni BYPASSRLS y dueño de la base `cxc`.
+#             Con un superusuario el Row Level Security no aplicaría; la app se niega a arrancar si
+#             detecta uno.
+#
+# Puerto 5433 en el host para no chocar con un PostgreSQL local en 5432.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cxc-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_dev
+      POSTGRES_DB: postgres
+      TZ: UTC
+    ports:
+      - "5433:5432"
+    volumes:
+      - cxc-datos:/var/lib/postgresql/data
+    configs:
+      - source: roles_iniciales
+        target: /docker-entrypoint-initdb.d/01-roles.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cxc_app -d cxc"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+configs:
+  roles_iniciales:
+    content: |
+      CREATE ROLE cxc_app LOGIN PASSWORD 'cxc_app_dev' NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
+      CREATE DATABASE cxc OWNER cxc_app;
+
+volumes:
+  cxc-datos:

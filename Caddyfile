@@ -1,0 +1,57 @@
+# Proxy inverso con HTTPS automático. Caddy pide y renueva los certificados de Let's Encrypt solo;
+# no hay nada que configurar ni que renovar a mano.
+#
+# Se valida con:
+#   docker run --rm -e DOMINIOS=ejemplo.sv -e EMAIL_ADMIN=a@b.sv \
+#     -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy caddy validate --config /etc/caddy/Caddyfile
+{
+	# Dirección a la que Let's Encrypt avisa si un certificado está por vencer sin renovarse.
+	email {$EMAIL_ADMIN}
+}
+
+# Cabeceras de seguridad. Van en un fragmento porque aplican igual al dominio base y a cada
+# subdominio de empresa.
+(seguridad) {
+	header {
+		# El producto se sirve en subdominios por empresa: includeSubDomains los cubre a todos.
+		# Sin "preload": entrar a la lista precargada de los navegadores es prácticamente
+		# irreversible y no se hace desde un archivo de configuración.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# La API devuelve PDF, CSV e imágenes subidas por los usuarios; sin esto el navegador
+		# podría adivinar el tipo y ejecutar como HTML un adjunto malicioso.
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# La cookie de sesión es SameSite=Lax, no sirve de protección anunciar el servidor.
+		-Server
+	}
+}
+
+# DOMINIOS lleva la lista de nombres atendidos, separados por espacios. Caddy sustituye la
+# variable antes de interpretar el archivo, así que cada nombre queda como una dirección más.
+#
+# No se usa *.dominio: el comodín obliga a validar por DNS (challenge DNS-01) y eso requiere un
+# módulo del proveedor de DNS compilado dentro de Caddy. Con Caddy pelado cada nombre se valida
+# por HTTP y por eso debe estar listado. Dar de alta una empresa nueva es agregar su subdominio a
+# DOMINIOS y recargar Caddy: no se recompila ni se despliega nada (ver DESPLIEGUE.md §5).
+{$DOMINIOS} {
+	import seguridad
+
+	# Comprime la API y el frontend (JSON, JS, CSS, HTML). Caddy no recomprime lo que ya viene
+	# comprimido, como los PDF y las fotos de los recibos.
+	encode zstd gzip
+
+	# Caddy conserva el Host original, que es como la aplicación resuelve la empresa por
+	# subdominio (DOMINIO_BASE en tenant.go).
+	#
+	# Sin chequeo de salud activo a propósito: hay una sola instancia detrás, así que sacarla de
+	# rotación no reparte la carga en ningún lado y solo cambiaría el 503 que devuelve /api/salud
+	# cuando la base no responde por un 502 del proxy, que dice menos. De reiniciar el contenedor
+	# enfermo se encarga el HEALTHCHECK de la imagen junto con restart: unless-stopped.
+	reverse_proxy aplicacion:8080
+
+	log {
+		output stdout
+		format console
+	}
+}

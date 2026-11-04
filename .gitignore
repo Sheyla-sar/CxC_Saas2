@@ -1,0 +1,41 @@
+# Binarios compilados. El proyecto se compila con `go build`; subir el ejecutable son 19 MB que
+# además quedan obsoletos en el primer cambio.
+cxc
+cxc.exe
+*.exe~
+
+# Configuración real. En el repositorio solo van los ejemplos (.env.ejemplo y
+# .env.produccion.ejemplo): las contraseñas de verdad nunca se versionan.
+.env
+.env.produccion
+.env.local
+
+# Respaldos de la base y adjuntos subidos por los usuarios: son DATOS, no código. Un respaldo en
+# el repositorio es una filtración de la cartera de un cliente.
+respaldos/
+archivos/*
+!archivos/.gitkeep
+
+# Documento comercial: precios, márgenes y qué falta antes de poder cobrar. Se trabaja junto al
+# código pero no se publica con él.
+COMERCIAL.md
+
+# Registros de ejecución.
+registros/
+*.log
+
+# Carpetas temporales de los verificadores (se crean con mktemp dentro del proyecto porque curl
+# en Windows no entiende las rutas /tmp de Git Bash).
+.verificar-cobranza.*
+.verificar-promesas.*
+
+# Basura del sistema operativo y de los editores.
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Carpeta temporal del alta de la empresa de demostración.
+.alta-empresa.*

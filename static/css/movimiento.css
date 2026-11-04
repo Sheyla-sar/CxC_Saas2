@@ -1,0 +1,54 @@
+/* Movimiento de Solvo. Solo presentación: 150–250 ms, y nada si el sistema pide menos movimiento. */
+
+.boton,
+.navegacion-item,
+.filtro,
+.campo input,
+.campo select,
+.campo textarea,
+.lista-fila,
+.tarjeta-venta,
+.banda-cifra,
+.volver {
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease, filter 180ms ease, transform 180ms ease;
+}
+
+.boton:hover:not(:disabled) { transform: translateY(-1px); }
+.boton:active:not(:disabled) { transform: translateY(0); transition-duration: 150ms; }
+
+@keyframes solvo-entrar {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes solvo-crecer-x {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes solvo-crecer-y {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+@keyframes solvo-fondo {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.pantalla-encabezado,
+.tarjeta,
+.tabla-contenedor,
+.columna-etapa,
+.aviso {
+  animation: solvo-entrar 220ms ease-out both;
+}
+.barra-relleno { animation: solvo-crecer-x 220ms ease-out both; }
+.columna-barra { animation: solvo-crecer-y 240ms ease-out both; }
+
+.modal-fondo { animation: solvo-fondo 180ms ease-out both; }
+.modal { animation: solvo-entrar 220ms ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

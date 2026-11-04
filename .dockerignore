@@ -1,0 +1,5 @@
+respaldos/
+archivos/
+*.exe
+.env
+static/**/*.map

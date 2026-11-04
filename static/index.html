@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    try {
+      var temaGuardado = localStorage.getItem('solvo-tema');
+      if (temaGuardado === 'claro' || temaGuardado === 'oscuro') {
+        document.documentElement.dataset.tema = temaGuardado;
+      }
+    } catch (e) { /* sin almacenamiento: queda el oscuro por defecto */ }
+  </script>
+  <title>Solvo</title>
+  <link rel="icon" href="/logo/solvo-favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/logo/solvo-favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/logo/solvo-favicon-180.png">
+  <link rel="stylesheet" href="/css/solvo-tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/componentes.css">
+  <link rel="stylesheet" href="/css/movimiento.css">
+</head>
+<body>
+  <div id="app" class="app" aria-live="polite"></div>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

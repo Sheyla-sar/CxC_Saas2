@@ -1,0 +1,118 @@
+# Pila completa para un VPS: PostgreSQL, la aplicación y Caddy como proxy con HTTPS automático.
+# El procedimiento de puesta en marcha, actualización y respaldo está en DESPLIEGUE.md.
+#
+#   cp .env.produccion.ejemplo .env     (y editarlo: sin eso, compose se niega a arrancar)
+#   docker compose -f docker-compose.produccion.yml up -d --build
+#
+# Compose lee ./.env del host para resolver las ${VARIABLES} de este archivo. Ese .env NO entra en
+# la imagen (.dockerignore lo excluye) ni se monta en el contenedor: la aplicación recibe su
+# configuración por `environment`, no por archivo.
+#
+# Solo Caddy publica puertos. Postgres y la aplicación quedan únicamente en la red interna de
+# compose: desde fuera del servidor no hay forma de hablarles.
+
+name: cxc
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    # Nombre fijo porque respaldar.sh y restaurar.sh hacen `docker exec cxc-postgres`.
+    container_name: cxc-postgres
+    restart: unless-stopped
+    environment:
+      # Superusuario: solo para administrar (pg_dump, pg_restore, crear la base de prueba).
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: postgres
+      # La lee el script de inicialización para crear el rol de la aplicación.
+      CXC_APP_PASSWORD: ${CXC_APP_PASSWORD:?falta CXC_APP_PASSWORD en .env}
+      # Las fechas de negocio se evalúan en la zona de cada empresa (empresa_config.zona_horaria),
+      # nunca en la del servidor. UTC evita que la base introduzca una zona distinta.
+      TZ: UTC
+    volumes:
+      - datos-postgres:/var/lib/postgresql/data
+    configs:
+      - source: roles_iniciales
+        target: /docker-entrypoint-initdb.d/01-roles.sh
+    healthcheck:
+      # Consulta la base y el rol de la aplicación, no los del superusuario: si el script de
+      # inicialización no corrió, el contenedor nunca se declara sano y la app no intenta arrancar.
+      test: ["CMD-SHELL", "pg_isready -U cxc_app -d cxc"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  aplicacion:
+    build:
+      context: .
+      args:
+        # Queda compilada en el binario y la devuelve /api/salud: así se sabe qué está corriendo.
+        VERSION: ${VERSION:?falta VERSION en .env}
+    # Etiquetar cada versión permite volver atrás sin recompilar (ver DESPLIEGUE.md §6).
+    image: cxc:${VERSION:?falta VERSION en .env}
+    container_name: cxc-aplicacion
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PUERTO: "8080"
+      # Cualquier valor distinto de "dev": no siembra datos de prueba, exige DATABASE_URL y marca
+      # la cookie de sesión como Secure.
+      ENTORNO: produccion
+      # sslmode=disable es correcto aquí: el tráfico no sale de la red interna de compose.
+      DATABASE_URL: postgres://cxc_app:${CXC_APP_PASSWORD:?falta CXC_APP_PASSWORD en .env}@postgres:5432/cxc?sslmode=disable
+      # Habilita <slug>.<dominio>. Si está vacío, la empresa se resuelve solo por la sesión.
+      DOMINIO_BASE: ${DOMINIO_BASE:-}
+      TZ: UTC
+    volumes:
+      # Los adjuntos van a una carpeta del host, no a un volumen con nombre, para que respaldar.sh
+      # pueda empaquetarlos sin privilegios de root. La carpeta debe pertenecer al uid 10001
+      # (el usuario de la imagen); DESPLIEGUE.md §4 tiene el chown.
+      - ./archivos:/datos/archivos
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: cxc-caddy
+    restart: unless-stopped
+    depends_on:
+      - aplicacion
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      DOMINIOS: ${DOMINIOS:?falta DOMINIOS en .env}
+      EMAIL_ADMIN: ${EMAIL_ADMIN:?falta EMAIL_ADMIN en .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Los certificados emitidos viven aquí. Perder este volumen significa volver a pedirlos a
+      # Let's Encrypt, que tiene límites por semana y por dominio.
+      - caddy-datos:/data
+      - caddy-config:/config
+
+configs:
+  # Script de inicialización de Postgres. Corre UNA sola vez, cuando el volumen de datos está
+  # vacío. Si la base ya existe, cambiar la contraseña aquí no tiene efecto (ver DESPLIEGUE.md §9).
+  #
+  # Los $$ evitan que compose expanda las variables: las resuelve la shell dentro del contenedor,
+  # así la contraseña no queda escrita en la definición del config.
+  roles_iniciales:
+    content: |
+      #!/bin/sh
+      set -e
+      # cxc_app es dueño de la base y NO tiene superusuario ni BYPASSRLS. El aislamiento entre
+      # empresas depende de las dos cosas: con un superusuario, FORCE ROW LEVEL SECURITY no
+      # aplicaría y la aplicación se niega a arrancar.
+      #
+      # :'clave' hace que psql cite la contraseña correctamente, sea cual sea su contenido.
+      psql -v ON_ERROR_STOP=1 -v clave="$$CXC_APP_PASSWORD" --username "$$POSTGRES_USER" --dbname postgres <<'SQL'
+      CREATE ROLE cxc_app LOGIN PASSWORD :'clave' NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
+      CREATE DATABASE cxc OWNER cxc_app;
+      SQL
+
+volumes:
+  datos-postgres:
+  caddy-datos:
+  caddy-config:
