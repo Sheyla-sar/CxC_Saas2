@@ -1,0 +1,933 @@
+diff --git a/.env.ejemplo b/.env.ejemplo
+index 60aa785..338d3fa 100644
+--- a/.env.ejemplo
++++ b/.env.ejemplo
+@@ -19,3 +19,15 @@ ENTORNO=dev
+ # pertenecer a la empresa con slug abarroteria-lopez; si no coincide con la sesión, responde 403.
+ # Vacío = resolución por subdominio deshabilitada (solo sesión + header X-Empresa-Slug).
+ DOMINIO_BASE=
++
++# ── Opcionales para despliegues sin disco persistente (Vercel). Ver DESPLIEGUE_VERCEL.md ──
++
++# Dónde se guardan las fotos y PDF que suben los usuarios.
++#   disco (por defecto) -> carpeta RUTA_ARCHIVOS. Para un servidor con volumen persistente.
++#   db                  -> columna adjunto.contenido en PostgreSQL. Para Vercel.
++ALMACEN_ARCHIVOS=disco
++
++# Tope de conexiones del pool hacia PostgreSQL (1-100). Vacío = 20. En Vercel use 5.
++DB_MAX_CONEXIONES=
++
++# PORT es el nombre que usan Vercel y otras plataformas. Si PUERTO también está definido, manda PUERTO.
+diff --git a/DESPLIEGUE_VERCEL.md b/DESPLIEGUE_VERCEL.md
+new file mode 100644
+index 0000000..df3c1f2
+--- /dev/null
++++ b/DESPLIEGUE_VERCEL.md
+@@ -0,0 +1,83 @@
++# DESPLIEGUE_VERCEL.md — correr todo el sistema en Vercel
++
++Vercel corre la aplicación completa (API en Go + interfaz) con su **Container Runtime**, a partir de
++`Dockerfile.vercel`. No hay que separar frontend y backend: es el mismo binario de siempre.
++
++Como Vercel no tiene estado (una instancia se apaga tras 5 minutos sin tráfico y puede haber varias a la
++vez), lo que antes vivía en la memoria o el disco del proceso ahora vive en PostgreSQL:
++
++| Antes | Ahora | Cómo se activa |
++|---|---|---|
++| Sesiones en memoria | Tabla `sesion` (solo se guarda el SHA-256 del token) | Siempre |
++| Límite de intentos de login en memoria | Tabla `intento_ingreso` | Siempre |
++| Fotos y PDF en disco | Columna `adjunto.contenido` | `ALMACEN_ARCHIVOS=db` |
++
++Con `ALMACEN_ARCHIVOS=disco` (el valor por defecto) el despliegue en VPS de `DESPLIEGUE.md` sigue igual.
++
++## 1. Base de datos en Neon
++
++1. Cree un proyecto en [neon.com](https://neon.com) (o desde Vercel → Storage → Marketplace → Neon).
++2. En el SQL Editor, ejecute `neon_rol.sql` (cambie la contraseña). Crea el rol `cxc_app` y la base `cxc`.
++   **No use el rol por defecto de Neon:** la aplicación se niega a arrancar con un rol que ignore Row Level Security.
++3. Arme la `DATABASE_URL` con el host **sin** `-pooler`:
++
++   ```
++   postgres://cxc_app:SU_CLAVE@ep-xxxx.us-east-2.aws.neon.tech/cxc?sslmode=require
++   ```
++
++   Si usa la URL con `-pooler`, la aplicación cambia sola al protocolo simple de pgx y debería funcionar,
++   pero es la ruta menos probada.
++
++## 2. Crear la primera empresa (una sola vez, desde su computadora)
++
++```bash
++DATABASE_URL='postgres://cxc_app:...@.../cxc?sslmode=require' ENTORNO=produccion \
++go run . crear-empresa --slug mi-empresa --nombre-legal "Mi Empresa, S.A. de C.V." \
++  --nombre-comercial "Mi Empresa" --admin-nombre "Su Nombre" \
++  --admin-email "usted@ejemplo.com" --admin-password "UnaClaveLarga123"
++```
++
++Este comando también aplica las migraciones. En producción no se siembran datos de prueba.
++
++## 3. Desplegar en Vercel
++
++1. Suba el repositorio a GitHub (incluya `Dockerfile.vercel`).
++2. vercel.com → **Add New → Project** → importe el repositorio.
++3. Si Vercel no selecciona **Container** como preset (el repo tiene `go.mod`, y puede detectar Go), cámbielo en
++   Settings → General → Framework Preset. `Dockerfile.vercel` está pensado para ganar sobre la detección de Go.
++   Con la CLI: `vercel project update --framework container --yes`.
++4. En **Settings → Environment Variables** agregue:
++
++   | Variable | Valor |
++   |---|---|
++   | `PORT` | `8080` (obligatoria: Vercel enruta al puerto 80 si no se define) |
++   | `DATABASE_URL` | la URL del paso 1 |
++   | `DOMINIO_BASE` | opcional, solo si usa subdominios por empresa |
++
++   `ENTORNO=produccion`, `ALMACEN_ARCHIVOS=db` y `DB_MAX_CONEXIONES=5` ya vienen en `Dockerfile.vercel`.
++5. **Deploy**. Después: `https://SU-PROYECTO.vercel.app/api/salud` debe responder `"base_de_datos":"ok"`.
++6. Entre con el slug, correo y clave del paso 2.
++
++## 4. Límites que debe conocer
++
++- **Cuerpo de petición y respuesta: 4.5 MB** (límite de Vercel Functions). Una foto de celular de más de 4.5 MB
++  se rechaza con 413 antes de llegar a la aplicación, y un PDF o un listado más grande que eso tampoco se entrega.
++  El `DESPLIEGUE.md` calcula `/api/cuentas` en ~12 MB con 20,000 cuentas: para empresas de ese tamaño, Vercel no sirve
++  sin antes paginar los listados.
++- **Almacenamiento:** las fotos ahora ocupan espacio de la base. Neon gratis incluye 0.5 GB (unas 1,000 fotos de
++  medio MB). Si va a crecer, plan de pago o un almacén de objetos.
++- **Arranque en frío:** tras 5 minutos sin tráfico la instancia se apaga y la siguiente petición espera a que arranque
++  (y a que Neon despierte, si estaba suspendido).
++- **Container Runtime está en Beta** en Vercel.
++- **Subdominios por empresa:** requieren agregar `*.sudominio.com` en Vercel (comodín) y `DOMINIO_BASE`.
++
++## 5. Qué se probó y qué no
++
++Probado localmente (PostgreSQL 16, Go 1.27) con los tres verificadores del repo: **277 comprobaciones, todas
++correctas** con `ALMACEN_ARCHIVOS=db`. Además: una sesión creada en una instancia vale en otra instancia y sobrevive a un
++reinicio; el límite de intentos se cuenta entre instancias (el 6.º fallo da 429); una foto subida se guarda en la
++base, se baja idéntica desde otra instancia, se incrusta en el PDF y otra empresa no puede verla; en modo producción
++el servidor escucha en `PORT`, no siembra datos de prueba y marca la cookie como `Secure`.
++
++**No probado:** el build real de `Dockerfile.vercel` en Vercel, la conexión a Neon y el comportamiento del
++Container Runtime. Si el primer despliegue falla, mire los logs de build y de ejecución de Vercel.
+diff --git a/Dockerfile.vercel b/Dockerfile.vercel
+new file mode 100644
+index 0000000..0bc6110
+--- /dev/null
++++ b/Dockerfile.vercel
+@@ -0,0 +1,34 @@
++# Imagen para desplegar en Vercel (Container Runtime). Vercel usa este archivo y no el Dockerfile
++# normal cuando existe: Dockerfile.vercel gana sobre la detección automática de Go.
++#
++# Diferencias con el Dockerfile del VPS:
++#   - Sin HEALTHCHECK (Vercel no lo usa).
++#   - ENTORNO=produccion y ALMACEN_ARCHIVOS=db por defecto: la función no tiene disco persistente,
++#     así que las sesiones y los adjuntos viven en PostgreSQL (ver DESPLIEGUE_VERCEL.md).
++#   - Pool de base de datos chico: cada instancia abre el suyo y Vercel limita los descriptores.
++#
++# Variables que SÍ hay que definir en el proyecto de Vercel: PORT=8080 y DATABASE_URL.
++
++FROM golang:1.27-alpine AS construccion
++WORKDIR /origen
++COPY go.mod go.sum ./
++RUN go mod download
++COPY . .
++ARG VERSION=vercel
++RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /cxc .
++
++FROM alpine:3.21
++RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 aplicacion
++WORKDIR /aplicacion
++COPY --from=construccion /cxc /aplicacion/cxc
++COPY static /aplicacion/static
++COPY assets/pdf /aplicacion/assets/pdf
++
++ENV ENTORNO=produccion \
++    ALMACEN_ARCHIVOS=db \
++    DB_MAX_CONEXIONES=5 \
++    PUERTO=8080
++
++USER aplicacion
++EXPOSE 8080
++ENTRYPOINT ["/aplicacion/cxc"]
+diff --git a/README.md b/README.md
+index 079227d..191dc5c 100644
+--- a/README.md
++++ b/README.md
+@@ -9,7 +9,8 @@ API JSON en Go + PostgreSQL, con una interfaz web sin dependencias servida por e
+ 
+ Las reglas de negocio, el modelo de datos y las decisiones de arquitectura están en
+ [`CLAUDE.md`](CLAUDE.md), que es la referencia para las siguientes fases.
+-La puesta en producción está en [`DESPLIEGUE.md`](DESPLIEGUE.md).
++La puesta en producción está en [`DESPLIEGUE.md`](DESPLIEGUE.md) (VPS con Docker) y en
++[`DESPLIEGUE_VERCEL.md`](DESPLIEGUE_VERCEL.md) (todo en Vercel, con PostgreSQL en Neon).
+ 
+ ## Requisitos
+ 
+diff --git a/archivos.go b/archivos.go
+index 2c0876d..1a6e9a0 100644
+--- a/archivos.go
++++ b/archivos.go
+@@ -1,12 +1,19 @@
+ package main
+ 
+-// archivos.go — guarda en disco las fotos y PDF que suben los usuarios (recibos, facturas,
+-// comprobantes de depósito) y los devuelve solo a usuarios con sesión de la misma empresa.
+-// El metadato vive en la tabla adjunto; aquí solo está el archivo.
++// archivos.go — guarda las fotos y PDF que suben los usuarios (recibos, facturas, comprobantes de
++// depósito) y los devuelve solo a usuarios con sesión de la misma empresa.
++//
++// Hay dos almacenes, según ALMACEN_ARCHIVOS:
++//   - "disco" (por defecto): el archivo va a la carpeta RUTA_ARCHIVOS y la tabla adjunto guarda
++//     la ruta en la columna archivo. Para un servidor con volumen persistente.
++//   - "db": el archivo va en adjunto.contenido y archivo queda vacío. Para plataformas sin disco
++//     persistente (Vercel). Hereda el aislamiento por empresa de la tabla adjunto.
+ 
+ import (
++	"bytes"
+ 	"crypto/rand"
+ 	"encoding/hex"
++	"errors"
+ 	"fmt"
+ 	"image"
+ 	_ "image/jpeg" // registra el decodificador: se comprueba que la foto subida se pueda leer
+@@ -17,6 +24,7 @@ import (
+ 	"net/http"
+ 	"os"
+ 	"path/filepath"
++	"strconv"
+ 	"strings"
+ )
+ 
+@@ -31,12 +39,20 @@ const tamanoMaximoFirma = 2 << 20 // 2 MB
+ // TituloFirma lo pone el sistema: el cliente que firma no va a escribir un título.
+ const TituloFirma = "Firma del cliente"
+ 
+-var rutaArchivos = "archivos"
++var (
++	rutaArchivos = "archivos"
++	// guardarEnBase: true = los adjuntos nuevos se guardan en la base (ALMACEN_ARCHIVOS=db).
++	guardarEnBase = false
++)
+ 
+-func configurarArchivos(ruta string) error {
++func configurarArchivos(ruta string, enBase bool) error {
++	guardarEnBase = enBase
+ 	if strings.TrimSpace(ruta) != "" {
+ 		rutaArchivos = ruta
+ 	}
++	if enBase {
++		return nil // no hay carpeta que preparar: el disco de la plataforma puede ser de solo lectura
++	}
+ 	return os.MkdirAll(rutaArchivos, 0o755)
+ }
+ 
+@@ -171,18 +187,36 @@ func guardarAdjunto(t *Tenant, cfg ConfigEmpresa, archivo multipart.File, cabece
+ 		return Adjunto{}, err
+ 	}
+ 
+-	ruta, err := rutaDeAdjunto(t.EmpresaID, extension)
+-	if err != nil {
+-		return Adjunto{}, err
+-	}
+-	escritos, err := guardarEnDisco(ruta, archivo, maximo)
+-	if err != nil {
+-		borrarArchivo(ruta)
+-		return Adjunto{}, err
+-	}
+-	if err := verificarImagenLegible(ruta, tipoMime); err != nil {
+-		borrarArchivo(ruta)
+-		return Adjunto{}, err
++	// Almacén en base: el archivo se lee completo (con tope) y se valida en memoria. Almacén en
++	// disco: se escribe en la carpeta de la empresa y se valida desde ahí.
++	var (
++		ruta      string
++		contenido []byte
++		escritos  int64
++	)
++	if guardarEnBase {
++		contenido, err = leerConTope(archivo, maximo)
++		if err != nil {
++			return Adjunto{}, err
++		}
++		escritos = int64(len(contenido))
++		if err := verificarImagenLegible(bytes.NewReader(contenido), tipoMime); err != nil {
++			return Adjunto{}, err
++		}
++	} else {
++		ruta, err = rutaDeAdjunto(t.EmpresaID, extension)
++		if err != nil {
++			return Adjunto{}, err
++		}
++		escritos, err = guardarEnDisco(ruta, archivo, maximo)
++		if err != nil {
++			borrarArchivo(ruta)
++			return Adjunto{}, err
++		}
++		if err := verificarImagenEnDisco(ruta, tipoMime); err != nil {
++			borrarArchivo(ruta)
++			return Adjunto{}, err
++		}
+ 	}
+ 
+ 	nombre, _ := ValidarTexto(filepath.Base(cabecera.Filename), "nombre", 200)
+@@ -194,8 +228,8 @@ func guardarAdjunto(t *Tenant, cfg ConfigEmpresa, archivo multipart.File, cabece
+ 	}
+ 	id, err := t.Repo.CrearAdjunto(t.EmpresaID, Adjunto{
+ 		Entidad: d.Entidad, EntidadID: d.EntidadID, Titulo: d.Titulo, Nombre: nombre, Clase: d.Clase,
+-		TipoMime: tipoMime, TamanoBytes: escritos, archivo: ruta, Descripcion: d.Descripcion,
+-		SubidoPor: t.Usuario.ID,
++		TipoMime: tipoMime, TamanoBytes: escritos, archivo: ruta, contenido: contenido,
++		Descripcion: d.Descripcion, SubidoPor: t.Usuario.ID,
+ 	})
+ 	if err != nil {
+ 		borrarArchivo(ruta)
+@@ -236,6 +270,18 @@ func guardarEnDisco(ruta string, origen multipart.File, maximo int64) (int64, er
+ 	return escritos, nil
+ }
+ 
++// leerConTope lee el archivo completo en memoria sin pasar de maximo bytes.
++func leerConTope(origen io.Reader, maximo int64) ([]byte, error) {
++	datos, err := io.ReadAll(io.LimitReader(origen, maximo+1))
++	if err != nil {
++		return nil, err
++	}
++	if int64(len(datos)) > maximo {
++		return nil, errRegla("ARCHIVO_DEMASIADO_GRANDE", "El archivo supera el tamaño permitido por su empresa.")
++	}
++	return datos, nil
++}
++
+ // hDescargarAdjunto entrega el archivo. Se escribe directo en la respuesta (no pasa por el
+ // envoltorio JSON) y solo después de confirmar que pertenece a la empresa de la sesión.
+ func (a *App) descargarAdjunto(w http.ResponseWriter, r *http.Request) {
+@@ -258,28 +304,36 @@ func (a *App) descargarAdjunto(w http.ResponseWriter, r *http.Request) {
+ 		escribirError(w, err)
+ 		return
+ 	}
+-	archivo, err := os.Open(adj.archivo)
++	datos, err := leerAdjunto(adj)
+ 	if err != nil {
+ 		escribirError(w, errNoEncontrado("ARCHIVO_NO_DISPONIBLE", "El archivo ya no está disponible."))
+ 		return
+ 	}
+-	defer archivo.Close()
+ 	w.Header().Set("Content-Type", adj.TipoMime)
+ 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", adj.Nombre))
+ 	w.Header().Set("Cache-Control", "private, no-store")
+-	io.Copy(w, archivo)
++	w.Header().Set("Content-Length", strconv.Itoa(len(datos)))
++	w.Write(datos)
+ }
+ 
+-// leerAdjunto devuelve el contenido de un archivo para incrustarlo en un PDF.
++// leerAdjunto devuelve el contenido de un archivo, venga del disco o de la base. Los adjuntos con
++// ruta (almacén en disco, o subidos antes de pasar a la base) se leen del disco; los demás, de
++// adjunto.contenido.
+ func leerAdjunto(a Adjunto) ([]byte, error) {
+-	return os.ReadFile(a.archivo)
++	if a.archivo != "" {
++		return os.ReadFile(a.archivo)
++	}
++	if a.leerDeBase != nil {
++		return a.leerDeBase()
++	}
++	return nil, errors.New("el adjunto no tiene contenido")
+ }
+ 
+ // verificarImagenLegible comprueba que la foto se pueda decodificar de verdad. Un archivo con la
+ // cabecera correcta pero el contenido dañado (una subida cortada, por ejemplo) pasa la detección
+ // de tipo y recién fallaría al imprimirlo; mejor rechazarlo cuando el usuario todavía está frente
+ // a la cámara y puede repetir la toma.
+-func verificarImagenLegible(ruta, tipoMime string) error {
++func verificarImagenEnDisco(ruta, tipoMime string) error {
+ 	if tipoMime != "image/jpeg" && tipoMime != "image/png" {
+ 		return nil
+ 	}
+@@ -288,9 +342,18 @@ func verificarImagenLegible(ruta, tipoMime string) error {
+ 		return err
+ 	}
+ 	defer f.Close()
++	return verificarImagenLegible(f, tipoMime)
++}
++
++// verificarImagenLegible hace la comprobación sobre cualquier lector: el archivo en disco o los
++// bytes ya leídos en memoria.
++func verificarImagenLegible(r io.Reader, tipoMime string) error {
++	if tipoMime != "image/jpeg" && tipoMime != "image/png" {
++		return nil
++	}
+ 	// Se decodifica COMPLETA, no solo la cabecera: una subida cortada conserva la cabecera
+ 	// válida y solo se delata al leer los datos de la imagen.
+-	if _, _, err := image.Decode(f); err != nil {
++	if _, _, err := image.Decode(r); err != nil {
+ 		return errEntrada("IMAGEN_ILEGIBLE",
+ 			"La foto está dañada o quedó incompleta. Vuelva a tomarla y súbala de nuevo.")
+ 	}
+diff --git a/auth.go b/auth.go
+index d6d4541..c57768e 100644
+--- a/auth.go
++++ b/auth.go
+@@ -1,14 +1,18 @@
+ package main
+ 
+ import (
++	"context"
+ 	"crypto/rand"
++	"crypto/sha256"
++	"database/sql"
+ 	"encoding/base64"
++	"encoding/hex"
+ 	"errors"
+ 	"fmt"
++	"log"
+ 	"net"
+ 	"net/http"
+ 	"strings"
+-	"sync"
+ 	"time"
+ 
+ 	"golang.org/x/crypto/bcrypt"
+@@ -16,7 +20,7 @@ import (
+ 
+ const (
+ 	nombreCookieSesion = "sesion"
+-	// Duración de plataforma (no de empresa). Reiniciar la app cierra todas las sesiones.
++	// Duración de plataforma (no de empresa). Las sesiones viven en PostgreSQL (tabla sesion).
+ 	duracionSesion = 12 * time.Hour
+ 
+ 	// Límite de intentos fallidos de ingreso (fuerza bruta). De plataforma, no de empresa.
+@@ -26,70 +30,96 @@ const (
+ )
+ 
+ // ─────────────────────────────────────────────────────────────────────────────
+-// Limitador de intentos de ingreso (en memoria, como las sesiones)
++// Limitador de intentos de ingreso (en PostgreSQL, tabla intento_ingreso)
+ // ─────────────────────────────────────────────────────────────────────────────
+ 
+-type registroFallos struct {
+-	cantidad int
+-	desde    time.Time
++// Va en la base y no en memoria para que el límite valga aunque la petición caiga en otra
++// instancia (entornos sin estado, como Vercel) y sobreviva a un reinicio.
++
++// tiempoMaximoBase acota cada consulta de sesiones e intentos: si la base no responde, el login
++// falla pronto en lugar de colgar la petición.
++const tiempoMaximoBase = 5 * time.Second
++
++func contextoBase() (context.Context, context.CancelFunc) {
++	return context.WithTimeout(context.Background(), tiempoMaximoBase)
+ }
+ 
+ type LimitadorIngreso struct {
+-	mu     sync.Mutex
+-	fallos map[string]registroFallos
++	db *sql.DB
+ }
+ 
+-func nuevoLimitadorIngreso() *LimitadorIngreso {
+-	return &LimitadorIngreso{fallos: map[string]registroFallos{}}
++func nuevoLimitadorIngreso(db *sql.DB) *LimitadorIngreso {
++	return &LimitadorIngreso{db: db}
+ }
+ 
+ func claveCuenta(slug, email string) string { return "cuenta|" + slug + "|" + email }
+ func claveOrigen(ip string) string          { return "origen|" + ip }
+ 
+ // Bloqueado indica si alguna de las claves superó su límite y cuánto falta para reintentar.
++// Si la base no responde devuelve false: sin base tampoco hay login que proteger.
+ func (l *LimitadorIngreso) Bloqueado(ahora time.Time, cuenta, origen string) (bool, time.Duration) {
+-	l.mu.Lock()
+-	defer l.mu.Unlock()
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	filas, err := l.db.QueryContext(ctx,
++		`SELECT clave, cantidad, desde FROM intento_ingreso WHERE clave IN ($1, $2)`, cuenta, origen)
++	if err != nil {
++		log.Printf("limitador de ingreso: %v", err)
++		return false, 0
++	}
++	defer filas.Close()
++	maximos := map[string]int{cuenta: maxFallosPorCuenta, origen: maxFallosPorOrigen}
+ 	var espera time.Duration
+-	for clave, maximo := range map[string]int{cuenta: maxFallosPorCuenta, origen: maxFallosPorOrigen} {
+-		r, ok := l.fallos[clave]
+-		if !ok || ahora.Sub(r.desde) > ventanaIntentos {
++	for filas.Next() {
++		var clave string
++		var cantidad int
++		var desde time.Time
++		if err := filas.Scan(&clave, &cantidad, &desde); err != nil {
++			log.Printf("limitador de ingreso: %v", err)
++			return false, 0
++		}
++		if ahora.Sub(desde) > ventanaIntentos {
+ 			continue
+ 		}
+-		if r.cantidad >= maximo {
+-			espera = max(espera, ventanaIntentos-ahora.Sub(r.desde))
++		if cantidad >= maximos[clave] {
++			espera = max(espera, ventanaIntentos-ahora.Sub(desde))
+ 		}
+ 	}
+ 	return espera > 0, espera
+ }
+ 
+ func (l *LimitadorIngreso) RegistrarFallo(ahora time.Time, claves ...string) {
+-	l.mu.Lock()
+-	defer l.mu.Unlock()
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	vencidos := ahora.Add(-ventanaIntentos)
+ 	for _, clave := range claves {
+-		r, ok := l.fallos[clave]
+-		if !ok || ahora.Sub(r.desde) > ventanaIntentos {
+-			r = registroFallos{desde: ahora}
++		// Si el registro es de una ventana anterior, empieza de nuevo en 1.
++		_, err := l.db.ExecContext(ctx, `
++			INSERT INTO intento_ingreso (clave, cantidad, desde) VALUES ($1, 1, $2)
++			ON CONFLICT (clave) DO UPDATE SET
++				cantidad = CASE WHEN intento_ingreso.desde < $3 THEN 1 ELSE intento_ingreso.cantidad + 1 END,
++				desde    = CASE WHEN intento_ingreso.desde < $3 THEN $2 ELSE intento_ingreso.desde END`,
++			clave, ahora, vencidos)
++		if err != nil {
++			log.Printf("limitador de ingreso: %v", err)
+ 		}
+-		r.cantidad++
+-		l.fallos[clave] = r
+ 	}
+ }
+ 
+ func (l *LimitadorIngreso) Limpiar(clave string) {
+-	l.mu.Lock()
+-	delete(l.fallos, clave)
+-	l.mu.Unlock()
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	if _, err := l.db.ExecContext(ctx, `DELETE FROM intento_ingreso WHERE clave = $1`, clave); err != nil {
++		log.Printf("limitador de ingreso: %v", err)
++	}
+ }
+ 
+ // Purgar elimina registros vencidos. Se llama periódicamente desde main.
+ func (l *LimitadorIngreso) Purgar(ahora time.Time) {
+-	l.mu.Lock()
+-	defer l.mu.Unlock()
+-	for clave, r := range l.fallos {
+-		if ahora.Sub(r.desde) > ventanaIntentos {
+-			delete(l.fallos, clave)
+-		}
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	if _, err := l.db.ExecContext(ctx,
++		`DELETE FROM intento_ingreso WHERE desde < $1`, ahora.Add(-ventanaIntentos)); err != nil {
++		log.Printf("limitador de ingreso: %v", err)
+ 	}
+ }
+ 
+@@ -108,14 +138,20 @@ type Sesion struct {
+ 	Expira      time.Time
+ }
+ 
+-// AlmacenSesiones guarda las sesiones en memoria, protegidas por un mutex. Sin JWT.
++// AlmacenSesiones guarda las sesiones en PostgreSQL (tabla sesion). Sin JWT: el token de la cookie
++// es aleatorio y opaco, y en la base solo queda su SHA-256, así que quien lea la tabla no puede
++// reconstruir una cookie válida.
+ type AlmacenSesiones struct {
+-	mu       sync.Mutex
+-	sesiones map[string]Sesion
++	db *sql.DB
++}
++
++func nuevoAlmacenSesiones(db *sql.DB) *AlmacenSesiones {
++	return &AlmacenSesiones{db: db}
+ }
+ 
+-func nuevoAlmacenSesiones() *AlmacenSesiones {
+-	return &AlmacenSesiones{sesiones: map[string]Sesion{}}
++func hashDeToken(token string) string {
++	suma := sha256.Sum256([]byte(token))
++	return hex.EncodeToString(suma[:])
+ }
+ 
+ func (a *AlmacenSesiones) Crear(usuarioID, empresaID, slug string, ahora time.Time) (Sesion, error) {
+@@ -130,40 +166,53 @@ func (a *AlmacenSesiones) Crear(usuarioID, empresaID, slug string, ahora time.Ti
+ 		EmpresaSlug: slug,
+ 		Expira:      ahora.Add(duracionSesion),
+ 	}
+-	a.mu.Lock()
+-	a.sesiones[s.Token] = s
+-	a.mu.Unlock()
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	if _, err := a.db.ExecContext(ctx, `
++		INSERT INTO sesion (token_hash, usuario_id, empresa_ref, empresa_slug, expira)
++		VALUES ($1, $2, $3, $4, $5)`,
++		hashDeToken(s.Token), s.UsuarioID, s.EmpresaID, s.EmpresaSlug, s.Expira); err != nil {
++		return Sesion{}, err
++	}
+ 	return s, nil
+ }
+ 
+ func (a *AlmacenSesiones) Obtener(token string, ahora time.Time) (Sesion, bool) {
+-	a.mu.Lock()
+-	defer a.mu.Unlock()
+-	s, ok := a.sesiones[token]
+-	if !ok {
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	s := Sesion{Token: token}
++	err := a.db.QueryRowContext(ctx, `
++		SELECT usuario_id, empresa_ref, empresa_slug, expira
++		FROM sesion WHERE token_hash = $1`, hashDeToken(token)).
++		Scan(&s.UsuarioID, &s.EmpresaID, &s.EmpresaSlug, &s.Expira)
++	if errors.Is(err, sql.ErrNoRows) {
++		return Sesion{}, false
++	}
++	if err != nil {
++		log.Printf("sesiones: %v", err)
+ 		return Sesion{}, false
+ 	}
+ 	if ahora.After(s.Expira) {
+-		delete(a.sesiones, token)
++		a.Eliminar(token)
+ 		return Sesion{}, false
+ 	}
+ 	return s, true
+ }
+ 
+ func (a *AlmacenSesiones) Eliminar(token string) {
+-	a.mu.Lock()
+-	delete(a.sesiones, token)
+-	a.mu.Unlock()
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	if _, err := a.db.ExecContext(ctx, `DELETE FROM sesion WHERE token_hash = $1`, hashDeToken(token)); err != nil {
++		log.Printf("sesiones: %v", err)
++	}
+ }
+ 
+ // Limpiar elimina las sesiones vencidas. Se llama periódicamente desde main.
+ func (a *AlmacenSesiones) Limpiar(ahora time.Time) {
+-	a.mu.Lock()
+-	defer a.mu.Unlock()
+-	for t, s := range a.sesiones {
+-		if ahora.After(s.Expira) {
+-			delete(a.sesiones, t)
+-		}
++	ctx, cancelar := contextoBase()
++	defer cancelar()
++	if _, err := a.db.ExecContext(ctx, `DELETE FROM sesion WHERE expira < $1`, ahora); err != nil {
++		log.Printf("sesiones: %v", err)
+ 	}
+ }
+ 
+diff --git a/config.go b/config.go
+index 4fbb196..0567f6f 100644
+--- a/config.go
++++ b/config.go
+@@ -3,10 +3,18 @@ package main
+ import (
+ 	"bufio"
+ 	"errors"
++	"fmt"
+ 	"os"
++	"strconv"
+ 	"strings"
+ )
+ 
++// Valores de ALMACEN_ARCHIVOS: dónde se guardan las fotos y PDF que suben los usuarios.
++const (
++	almacenEnDisco       = "disco" // carpeta RUTA_ARCHIVOS (VPS con volumen persistente)
++	almacenEnBaseDeDatos = "db"    // columna adjunto.contenido (Vercel: el disco es efímero)
++)
++
+ // Config es la configuración de la PLATAFORMA (no de una empresa). Todo lo que varía por
+ // empresa vive en empresa_config / empresa_marca, nunca aquí.
+ type Config struct {
+@@ -17,6 +25,11 @@ type Config struct {
+ 	RutaArchivos string
+ 	// DominioBase habilita la resolución por subdominio: <slug>.<DominioBase>. Vacío = deshabilitado.
+ 	DominioBase string
++	// AlmacenArchivos decide dónde viven los adjuntos: "disco" (por defecto) o "db".
++	AlmacenArchivos string
++	// MaxConexionesDB acota el pool hacia PostgreSQL. En entornos sin estado cada instancia abre
++	// su propio pool, así que conviene un número chico (5). 0 = valor por defecto (20).
++	MaxConexionesDB int
+ }
+ 
+ // URL que coincide con docker-compose.yml, para que `go run .` funcione sin .env en desarrollo.
+@@ -27,11 +40,24 @@ func cargarConfig() (Config, error) {
+ 		return Config{}, err
+ 	}
+ 	c := Config{
+-		Puerto:       valorEnv("PUERTO", "8080"),
++		// PORT es el nombre que usan Vercel y otras plataformas; PUERTO manda si ambas existen.
++		Puerto:       valorEnv("PUERTO", valorEnv("PORT", "8080")),
+ 		Entorno:      valorEnv("ENTORNO", "dev"),
+ 		DatabaseURL:  strings.TrimSpace(os.Getenv("DATABASE_URL")),
+ 		DominioBase:  strings.ToLower(strings.TrimSpace(os.Getenv("DOMINIO_BASE"))),
+ 		RutaArchivos: valorEnv("RUTA_ARCHIVOS", "archivos"),
++		AlmacenArchivos: strings.ToLower(valorEnv("ALMACEN_ARCHIVOS", almacenEnDisco)),
++	}
++	if c.AlmacenArchivos != almacenEnDisco && c.AlmacenArchivos != almacenEnBaseDeDatos {
++		return Config{}, fmt.Errorf("ALMACEN_ARCHIVOS debe ser %q o %q, no %q",
++			almacenEnDisco, almacenEnBaseDeDatos, c.AlmacenArchivos)
++	}
++	if v := strings.TrimSpace(os.Getenv("DB_MAX_CONEXIONES")); v != "" {
++		n, err := strconv.Atoi(v)
++		if err != nil || n < 1 || n > 100 {
++			return Config{}, fmt.Errorf("DB_MAX_CONEXIONES debe ser un entero entre 1 y 100, no %q", v)
++		}
++		c.MaxConexionesDB = n
+ 	}
+ 	if c.DatabaseURL == "" {
+ 		if !c.EsDesarrollo() {
+diff --git a/db.go b/db.go
+index 9d4739c..e43523d 100644
+--- a/db.go
++++ b/db.go
+@@ -18,7 +18,9 @@ type querier interface {
+ 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+ }
+ 
+-func abrirDB(ctx context.Context, url string) (*sql.DB, error) {
++// maxConexiones acota el pool (0 = 20). En entornos sin estado, como Vercel, cada instancia abre el
++// suyo y la plataforma limita los descriptores de archivo, así que ahí conviene 5.
++func abrirDB(ctx context.Context, url string, maxConexiones int) (*sql.DB, error) {
+ 	cfg, err := pgx.ParseConfig(url)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("DATABASE_URL inválida: %w", err)
+@@ -28,12 +30,22 @@ func abrirDB(ctx context.Context, url string) (*sql.DB, error) {
+ 	// cliente con su cartera histórica) /api/resumen llegó a tardar más de 30 s hasta el siguiente
+ 	// autoanálisis. Los planes a medida se recalculan con el tamaño real de las tablas y con los
+ 	// filtros opcionales ($2 IS NULL OR ...) ya resueltos. El costo de planificar es de milisegundos.
+-	if _, definido := cfg.RuntimeParams["plan_cache_mode"]; !definido {
++	//
++	// Un pooler de conexiones en modo transacción (host con "-pooler", como el de Neon) rechaza
++	// parámetros de arranque como plan_cache_mode y no admite sentencias preparadas por
++	// conexión. Ahí se usa el protocolo simple: cada consulta se planifica con sus valores, que es
++	// justo lo que force_custom_plan buscaba.
++	if strings.Contains(cfg.Host, "-pooler") {
++		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
++	} else if _, definido := cfg.RuntimeParams["plan_cache_mode"]; !definido {
+ 		cfg.RuntimeParams["plan_cache_mode"] = "force_custom_plan"
+ 	}
++	if maxConexiones <= 0 {
++		maxConexiones = 20
++	}
+ 	db := stdlib.OpenDB(*cfg)
+-	db.SetMaxOpenConns(20)
+-	db.SetMaxIdleConns(10)
++	db.SetMaxOpenConns(maxConexiones)
++	db.SetMaxIdleConns(min(10, maxConexiones))
+ 	db.SetConnMaxLifetime(30 * time.Minute)
+ 
+ 	// Postgres puede estar arrancando todavía (docker compose up -d recién ejecutado).
+diff --git a/main.go b/main.go
+index 7ea9092..c4d646d 100644
+--- a/main.go
++++ b/main.go
+@@ -53,7 +53,7 @@ func servir() error {
+ 	}
+ 	ctx := context.Background()
+ 
+-	db, err := abrirDB(ctx, cfg.DatabaseURL)
++	db, err := abrirDB(ctx, cfg.DatabaseURL, cfg.MaxConexionesDB)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -80,7 +80,7 @@ func servir() error {
+ 		}
+ 	}
+ 
+-	if err := configurarArchivos(cfg.RutaArchivos); err != nil {
++	if err := configurarArchivos(cfg.RutaArchivos, cfg.AlmacenArchivos == almacenEnBaseDeDatos); err != nil {
+ 		return fmt.Errorf("no se pudo preparar la carpeta de archivos adjuntos: %w", err)
+ 	}
+ 
+@@ -88,7 +88,7 @@ func servir() error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	app := &App{db: db, cfg: cfg, sesiones: nuevoAlmacenSesiones(), intentos: nuevoLimitadorIngreso(), hashFicticio: hashFicticio}
++	app := &App{db: db, cfg: cfg, sesiones: nuevoAlmacenSesiones(db), intentos: nuevoLimitadorIngreso(db), hashFicticio: hashFicticio}
+ 
+ 	go func() {
+ 		for range time.Tick(10 * time.Minute) {
+diff --git a/migraciones/010_sesiones_en_base.sql b/migraciones/010_sesiones_en_base.sql
+new file mode 100644
+index 0000000..db910c9
+--- /dev/null
++++ b/migraciones/010_sesiones_en_base.sql
+@@ -0,0 +1,30 @@
++-- 010_sesiones_en_base.sql
++-- Sesiones y límite de intentos de ingreso en PostgreSQL, no en la memoria del proceso.
++--
++-- Por qué: en un entorno sin estado (Vercel, o cualquier plataforma que reinicia o duplica
++-- instancias) la memoria de un proceso no sirve: la siguiente petición puede caer en otra
++-- instancia y el usuario quedaría fuera. Con las sesiones en la base, cualquier instancia
++-- reconoce al usuario y un reinicio ya no cierra las sesiones.
++--
++-- Estas dos tablas NO llevan columna empresa_id y NO usan Row Level Security, a propósito:
++-- se consultan ANTES de saber a qué empresa pertenece la petición (la sesión es justamente lo que
++-- lo dice). La seguridad está en que solo se guarda el SHA-256 del token: quien lea la tabla
++-- no puede reconstruir una cookie válida.
++
++CREATE TABLE sesion (
++    token_hash   TEXT PRIMARY KEY,
++    usuario_id   UUID NOT NULL,
++    empresa_ref  UUID NOT NULL,
++    empresa_slug TEXT NOT NULL,
++    expira       TIMESTAMPTZ NOT NULL
++);
++
++CREATE INDEX idx_sesion_expira ON sesion (expira);
++
++CREATE TABLE intento_ingreso (
++    clave    TEXT PRIMARY KEY,
++    cantidad INT NOT NULL CHECK (cantidad > 0),
++    desde    TIMESTAMPTZ NOT NULL
++);
++
++CREATE INDEX idx_intento_ingreso_desde ON intento_ingreso (desde);
+diff --git a/migraciones/011_adjunto_contenido.sql b/migraciones/011_adjunto_contenido.sql
+new file mode 100644
+index 0000000..9c5af44
+--- /dev/null
++++ b/migraciones/011_adjunto_contenido.sql
+@@ -0,0 +1,10 @@
++-- 011_adjunto_contenido.sql
++-- Permite guardar el contenido de un adjunto (foto o PDF) en la propia base de datos.
++--
++-- Se usa cuando ALMACEN_ARCHIVOS=db (Vercel: el disco de la función es efímero). Con el modo
++-- por defecto (ALMACEN_ARCHIVOS=disco) esta columna queda en NULL y el archivo sigue en disco.
++-- La columna archivo conserva su NOT NULL: en modo db se guarda vacía.
++--
++-- adjunto ya tiene Row Level Security, así que el contenido hereda el aislamiento por empresa.
++
++ALTER TABLE adjunto ADD COLUMN contenido BYTEA;
+diff --git a/modelos.go b/modelos.go
+index a4e9fcb..997b82c 100644
+--- a/modelos.go
++++ b/modelos.go
+@@ -335,8 +335,12 @@ type Adjunto struct {
+ 	SubidoPor       string    `json:"subido_por"`
+ 	SubidoPorNombre string    `json:"subido_por_nombre"`
+ 	CreadoEn        time.Time `json:"creado_en"`
+-	// archivo es la ruta en disco: nunca se expone en la API.
++	// archivo es la ruta en disco: nunca se expone en la API. Vacío cuando el contenido está en la base.
+ 	archivo string
++	// contenido solo se llena al CREAR un adjunto con ALMACEN_ARCHIVOS=db; al leer queda vacío.
++	contenido []byte
++	// leerDeBase trae adjunto.contenido bajo demanda (listar adjuntos no debe cargar las fotos).
++	leerDeBase func() ([]byte, error)
+ }
+ 
+ // ComoSeLlama devuelve el título si lo tiene y, si no, el nombre del archivo: en los listados y
+diff --git a/neon_rol.sql b/neon_rol.sql
+new file mode 100644
+index 0000000..e4b3812
+--- /dev/null
++++ b/neon_rol.sql
+@@ -0,0 +1,16 @@
++-- Crea el rol y la base de la aplicación en Neon (o en cualquier PostgreSQL administrado).
++-- Ejecútelo en el SQL Editor de Neon, conectado como el rol dueño de su proyecto (por defecto
++-- neondb_owner). La aplicación se niega a arrancar con un rol que sea superusuario o tenga
++-- BYPASSRLS, porque Row Level Security no lo restringiría: por eso NO use el rol por defecto.
++--
++-- 1) Cambie CAMBIAR por una contraseña larga sin caracteres especiales:
++--      openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40
++-- 2) Si su rol dueño no se llama neondb_owner, cámbielo en la segunda línea.
++
++CREATE ROLE cxc_app LOGIN PASSWORD 'CAMBIAR' NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
++GRANT cxc_app TO neondb_owner;
++CREATE DATABASE cxc OWNER cxc_app;
++
++-- Después, DATABASE_URL será:
++--   postgres://cxc_app:CAMBIAR@<host-SIN-pooler>/cxc?sslmode=require
++-- (el host de Neon sin "-pooler"; ver DESPLIEGUE_VERCEL.md §4)
+diff --git a/provision.go b/provision.go
+index b0724b0..6306bc4 100644
+--- a/provision.go
++++ b/provision.go
+@@ -65,7 +65,7 @@ func ejecutarCrearEmpresa(args []string) int {
+ 	}
+ 	ctx, cancelar := context.WithTimeout(context.Background(), 60*time.Second)
+ 	defer cancelar()
+-	db, err := abrirDB(ctx, cfg.DatabaseURL)
++	db, err := abrirDB(ctx, cfg.DatabaseURL, cfg.MaxConexionesDB)
+ 	if err != nil {
+ 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+ 		return 1
+diff --git a/repos_cobranza.go b/repos_cobranza.go
+index 712a3ac..9bba9c1 100644
+--- a/repos_cobranza.go
++++ b/repos_cobranza.go
+@@ -317,11 +317,26 @@ const selectAdjunto = `
+ 	JOIN usuario u ON u.empresa_id = a.empresa_id AND u.id = a.subido_por
+ 	WHERE a.empresa_id = $1`
+ 
+-func escanearAdjunto(s interface{ Scan(...any) error }) (Adjunto, error) {
++func (r *Repo) escanearAdjunto(s interface{ Scan(...any) error }) (Adjunto, error) {
+ 	var a Adjunto
+ 	err := s.Scan(&a.ID, &a.Entidad, &a.EntidadID, &a.Titulo, &a.Nombre, &a.Clase, &a.TipoMime,
+ 		&a.TamanoBytes, &a.Descripcion, &a.SubidoPor, &a.SubidoPorNombre, &a.CreadoEn, &a.archivo)
+-	return a, err
++	if err != nil {
++		return a, err
++	}
++	// El contenido (si está en la base) se trae solo cuando alguien lo pide: un listado de
++	// adjuntos no debe cargar todas las fotos en memoria. Usa la misma transacción (y por tanto
++	// el mismo app.empresa_id) que la consulta que lo trajo.
++	id, q, ctx := a.ID, r.q, r.ctx
++	a.leerDeBase = func() ([]byte, error) {
++		var datos []byte
++		err := q.QueryRowContext(ctx, `SELECT contenido FROM adjunto WHERE id = $1`, id).Scan(&datos)
++		if err == nil && datos == nil {
++			err = sql.ErrNoRows
++		}
++		return datos, err
++	}
++	return a, nil
+ }
+ 
+ func (r *Repo) ListarAdjuntos(empresaID, entidad, entidadID string) ([]Adjunto, error) {
+@@ -334,7 +349,7 @@ func (r *Repo) ListarAdjuntos(empresaID, entidad, entidadID string) ([]Adjunto,
+ 	defer filas.Close()
+ 	res := []Adjunto{}
+ 	for filas.Next() {
+-		a, err := escanearAdjunto(filas)
++		a, err := r.escanearAdjunto(filas)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -363,7 +378,7 @@ func (r *Repo) ListarComprobantes(empresaID, entidad, entidadID string) ([]Adjun
+ // ÚLTIMA: al volver a firmar se reemplaza la anterior, y si alguna quedara rezagada manda la
+ // más reciente, que es la que el cliente trazó de verdad.
+ func (r *Repo) FirmaDeMovimiento(empresaID, movimientoID string) (Adjunto, bool, error) {
+-	a, err := escanearAdjunto(r.q.QueryRowContext(r.ctx,
++	a, err := r.escanearAdjunto(r.q.QueryRowContext(r.ctx,
+ 		selectAdjunto+` AND a.entidad = 'movimiento' AND a.entidad_id = $2 AND a.clase = $3
+ 		                ORDER BY a.creado_en DESC LIMIT 1`,
+ 		empresaID, movimientoID, ClaseFirma))
+@@ -374,7 +389,7 @@ func (r *Repo) FirmaDeMovimiento(empresaID, movimientoID string) (Adjunto, bool,
+ }
+ 
+ func (r *Repo) ObtenerAdjunto(empresaID, id string) (Adjunto, error) {
+-	a, err := escanearAdjunto(r.q.QueryRowContext(r.ctx, selectAdjunto+` AND a.id = $2`, empresaID, id))
++	a, err := r.escanearAdjunto(r.q.QueryRowContext(r.ctx, selectAdjunto+` AND a.id = $2`, empresaID, id))
+ 	return a, noEncontrado(err, errNoEncontrado("ADJUNTO_NO_ENCONTRADO", "No encontramos el archivo indicado."))
+ }
+ 
+@@ -382,10 +397,10 @@ func (r *Repo) CrearAdjunto(empresaID string, a Adjunto) (string, error) {
+ 	var id string
+ 	err := r.q.QueryRowContext(r.ctx, `
+ 		INSERT INTO adjunto (empresa_id, entidad, entidad_id, titulo, nombre, clase, tipo_mime,
+-		                     tamano_bytes, archivo, descripcion, subido_por)
+-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
++		                     tamano_bytes, archivo, descripcion, subido_por, contenido)
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+ 		empresaID, a.Entidad, a.EntidadID, a.Titulo, a.Nombre, claseOComprobante(a.Clase),
+-		a.TipoMime, a.TamanoBytes, a.archivo, a.Descripcion, a.SubidoPor).Scan(&id)
++		a.TipoMime, a.TamanoBytes, a.archivo, a.Descripcion, a.SubidoPor, a.contenido).Scan(&id)
+ 	return id, err
+ }
+ 

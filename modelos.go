@@ -335,8 +335,12 @@ type Adjunto struct {
 	SubidoPor       string    `json:"subido_por"`
 	SubidoPorNombre string    `json:"subido_por_nombre"`
 	CreadoEn        time.Time `json:"creado_en"`
-	// archivo es la ruta en disco: nunca se expone en la API.
+	// archivo es la ruta en disco: nunca se expone en la API. Vacío cuando el contenido está en la base.
 	archivo string
+	// contenido solo se llena al CREAR un adjunto con ALMACEN_ARCHIVOS=db; al leer queda vacío.
+	contenido []byte
+	// leerDeBase trae adjunto.contenido bajo demanda (listar adjuntos no debe cargar las fotos).
+	leerDeBase func() ([]byte, error)
 }
 
 // ComoSeLlama devuelve el título si lo tiene y, si no, el nombre del archivo: en los listados y

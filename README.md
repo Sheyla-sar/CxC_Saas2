@@ -9,7 +9,8 @@ API JSON en Go + PostgreSQL, con una interfaz web sin dependencias servida por e
 
 Las reglas de negocio, el modelo de datos y las decisiones de arquitectura están en
 [`CLAUDE.md`](CLAUDE.md), que es la referencia para las siguientes fases.
-La puesta en producción está en [`DESPLIEGUE.md`](DESPLIEGUE.md).
+La puesta en producción está en [`DESPLIEGUE.md`](DESPLIEGUE.md) (VPS con Docker) y en
+[`DESPLIEGUE_VERCEL.md`](DESPLIEGUE_VERCEL.md) (todo en Vercel, con PostgreSQL en Neon).
 
 ## Requisitos
 

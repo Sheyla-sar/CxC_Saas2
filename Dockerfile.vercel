@@ -1,0 +1,34 @@
+# Imagen para desplegar en Vercel (Container Runtime). Vercel usa este archivo y no el Dockerfile
+# normal cuando existe: Dockerfile.vercel gana sobre la detección automática de Go.
+#
+# Diferencias con el Dockerfile del VPS:
+#   - Sin HEALTHCHECK (Vercel no lo usa).
+#   - ENTORNO=produccion y ALMACEN_ARCHIVOS=db por defecto: la función no tiene disco persistente,
+#     así que las sesiones y los adjuntos viven en PostgreSQL (ver DESPLIEGUE_VERCEL.md).
+#   - Pool de base de datos chico: cada instancia abre el suyo y Vercel limita los descriptores.
+#
+# Variables que SÍ hay que definir en el proyecto de Vercel: PORT=8080 y DATABASE_URL.
+
+FROM golang:1.27-alpine AS construccion
+WORKDIR /origen
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=vercel
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /cxc .
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 aplicacion
+WORKDIR /aplicacion
+COPY --from=construccion /cxc /aplicacion/cxc
+COPY static /aplicacion/static
+COPY assets/pdf /aplicacion/assets/pdf
+
+ENV ENTORNO=produccion \
+    ALMACEN_ARCHIVOS=db \
+    DB_MAX_CONEXIONES=5 \
+    PUERTO=8080
+
+USER aplicacion
+EXPOSE 8080
+ENTRYPOINT ["/aplicacion/cxc"]

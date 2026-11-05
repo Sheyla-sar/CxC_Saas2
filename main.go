@@ -53,7 +53,7 @@ func servir() error {
 	}
 	ctx := context.Background()
 
-	db, err := abrirDB(ctx, cfg.DatabaseURL)
+	db, err := abrirDB(ctx, cfg.DatabaseURL, cfg.MaxConexionesDB)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func servir() error {
 		}
 	}
 
-	if err := configurarArchivos(cfg.RutaArchivos); err != nil {
+	if err := configurarArchivos(cfg.RutaArchivos, cfg.AlmacenArchivos == almacenEnBaseDeDatos); err != nil {
 		return fmt.Errorf("no se pudo preparar la carpeta de archivos adjuntos: %w", err)
 	}
 
@@ -88,7 +88,7 @@ func servir() error {
 	if err != nil {
 		return err
 	}
-	app := &App{db: db, cfg: cfg, sesiones: nuevoAlmacenSesiones(), intentos: nuevoLimitadorIngreso(), hashFicticio: hashFicticio}
+	app := &App{db: db, cfg: cfg, sesiones: nuevoAlmacenSesiones(db), intentos: nuevoLimitadorIngreso(db), hashFicticio: hashFicticio}
 
 	go func() {
 		for range time.Tick(10 * time.Minute) {

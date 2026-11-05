@@ -317,11 +317,26 @@ const selectAdjunto = `
 	JOIN usuario u ON u.empresa_id = a.empresa_id AND u.id = a.subido_por
 	WHERE a.empresa_id = $1`
 
-func escanearAdjunto(s interface{ Scan(...any) error }) (Adjunto, error) {
+func (r *Repo) escanearAdjunto(s interface{ Scan(...any) error }) (Adjunto, error) {
 	var a Adjunto
 	err := s.Scan(&a.ID, &a.Entidad, &a.EntidadID, &a.Titulo, &a.Nombre, &a.Clase, &a.TipoMime,
 		&a.TamanoBytes, &a.Descripcion, &a.SubidoPor, &a.SubidoPorNombre, &a.CreadoEn, &a.archivo)
-	return a, err
+	if err != nil {
+		return a, err
+	}
+	// El contenido (si está en la base) se trae solo cuando alguien lo pide: un listado de
+	// adjuntos no debe cargar todas las fotos en memoria. Usa la misma transacción (y por tanto
+	// el mismo app.empresa_id) que la consulta que lo trajo.
+	id, q, ctx := a.ID, r.q, r.ctx
+	a.leerDeBase = func() ([]byte, error) {
+		var datos []byte
+		err := q.QueryRowContext(ctx, `SELECT contenido FROM adjunto WHERE id = $1`, id).Scan(&datos)
+		if err == nil && datos == nil {
+			err = sql.ErrNoRows
+		}
+		return datos, err
+	}
+	return a, nil
 }
 
 func (r *Repo) ListarAdjuntos(empresaID, entidad, entidadID string) ([]Adjunto, error) {
@@ -334,7 +349,7 @@ func (r *Repo) ListarAdjuntos(empresaID, entidad, entidadID string) ([]Adjunto, 
 	defer filas.Close()
 	res := []Adjunto{}
 	for filas.Next() {
-		a, err := escanearAdjunto(filas)
+		a, err := r.escanearAdjunto(filas)
 		if err != nil {
 			return nil, err
 		}
@@ -363,7 +378,7 @@ func (r *Repo) ListarComprobantes(empresaID, entidad, entidadID string) ([]Adjun
 // ÚLTIMA: al volver a firmar se reemplaza la anterior, y si alguna quedara rezagada manda la
 // más reciente, que es la que el cliente trazó de verdad.
 func (r *Repo) FirmaDeMovimiento(empresaID, movimientoID string) (Adjunto, bool, error) {
-	a, err := escanearAdjunto(r.q.QueryRowContext(r.ctx,
+	a, err := r.escanearAdjunto(r.q.QueryRowContext(r.ctx,
 		selectAdjunto+` AND a.entidad = 'movimiento' AND a.entidad_id = $2 AND a.clase = $3
 		                ORDER BY a.creado_en DESC LIMIT 1`,
 		empresaID, movimientoID, ClaseFirma))
@@ -374,7 +389,7 @@ func (r *Repo) FirmaDeMovimiento(empresaID, movimientoID string) (Adjunto, bool,
 }
 
 func (r *Repo) ObtenerAdjunto(empresaID, id string) (Adjunto, error) {
-	a, err := escanearAdjunto(r.q.QueryRowContext(r.ctx, selectAdjunto+` AND a.id = $2`, empresaID, id))
+	a, err := r.escanearAdjunto(r.q.QueryRowContext(r.ctx, selectAdjunto+` AND a.id = $2`, empresaID, id))
 	return a, noEncontrado(err, errNoEncontrado("ADJUNTO_NO_ENCONTRADO", "No encontramos el archivo indicado."))
 }
 
@@ -382,10 +397,10 @@ func (r *Repo) CrearAdjunto(empresaID string, a Adjunto) (string, error) {
 	var id string
 	err := r.q.QueryRowContext(r.ctx, `
 		INSERT INTO adjunto (empresa_id, entidad, entidad_id, titulo, nombre, clase, tipo_mime,
-		                     tamano_bytes, archivo, descripcion, subido_por)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+		                     tamano_bytes, archivo, descripcion, subido_por, contenido)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
 		empresaID, a.Entidad, a.EntidadID, a.Titulo, a.Nombre, claseOComprobante(a.Clase),
-		a.TipoMime, a.TamanoBytes, a.archivo, a.Descripcion, a.SubidoPor).Scan(&id)
+		a.TipoMime, a.TamanoBytes, a.archivo, a.Descripcion, a.SubidoPor, a.contenido).Scan(&id)
 	return id, err
 }
 

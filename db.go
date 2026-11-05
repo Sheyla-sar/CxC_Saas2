@@ -18,7 +18,9 @@ type querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func abrirDB(ctx context.Context, url string) (*sql.DB, error) {
+// maxConexiones acota el pool (0 = 20). En entornos sin estado, como Vercel, cada instancia abre el
+// suyo y la plataforma limita los descriptores de archivo, así que ahí conviene 5.
+func abrirDB(ctx context.Context, url string, maxConexiones int) (*sql.DB, error) {
 	cfg, err := pgx.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("DATABASE_URL inválida: %w", err)
@@ -28,12 +30,22 @@ func abrirDB(ctx context.Context, url string) (*sql.DB, error) {
 	// cliente con su cartera histórica) /api/resumen llegó a tardar más de 30 s hasta el siguiente
 	// autoanálisis. Los planes a medida se recalculan con el tamaño real de las tablas y con los
 	// filtros opcionales ($2 IS NULL OR ...) ya resueltos. El costo de planificar es de milisegundos.
-	if _, definido := cfg.RuntimeParams["plan_cache_mode"]; !definido {
+	//
+	// Un pooler de conexiones en modo transacción (host con "-pooler", como el de Neon) rechaza
+	// parámetros de arranque como plan_cache_mode y no admite sentencias preparadas por
+	// conexión. Ahí se usa el protocolo simple: cada consulta se planifica con sus valores, que es
+	// justo lo que force_custom_plan buscaba.
+	if strings.Contains(cfg.Host, "-pooler") {
+		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	} else if _, definido := cfg.RuntimeParams["plan_cache_mode"]; !definido {
 		cfg.RuntimeParams["plan_cache_mode"] = "force_custom_plan"
 	}
+	if maxConexiones <= 0 {
+		maxConexiones = 20
+	}
 	db := stdlib.OpenDB(*cfg)
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(maxConexiones)
+	db.SetMaxIdleConns(min(10, maxConexiones))
 	db.SetConnMaxLifetime(30 * time.Minute)
 
 	// Postgres puede estar arrancando todavía (docker compose up -d recién ejecutado).

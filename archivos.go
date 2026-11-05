@@ -1,12 +1,19 @@
 package main
 
-// archivos.go — guarda en disco las fotos y PDF que suben los usuarios (recibos, facturas,
-// comprobantes de depósito) y los devuelve solo a usuarios con sesión de la misma empresa.
-// El metadato vive en la tabla adjunto; aquí solo está el archivo.
+// archivos.go — guarda las fotos y PDF que suben los usuarios (recibos, facturas, comprobantes de
+// depósito) y los devuelve solo a usuarios con sesión de la misma empresa.
+//
+// Hay dos almacenes, según ALMACEN_ARCHIVOS:
+//   - "disco" (por defecto): el archivo va a la carpeta RUTA_ARCHIVOS y la tabla adjunto guarda
+//     la ruta en la columna archivo. Para un servidor con volumen persistente.
+//   - "db": el archivo va en adjunto.contenido y archivo queda vacío. Para plataformas sin disco
+//     persistente (Vercel). Hereda el aislamiento por empresa de la tabla adjunto.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg" // registra el decodificador: se comprueba que la foto subida se pueda leer
@@ -17,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -31,11 +39,19 @@ const tamanoMaximoFirma = 2 << 20 // 2 MB
 // TituloFirma lo pone el sistema: el cliente que firma no va a escribir un título.
 const TituloFirma = "Firma del cliente"
 
-var rutaArchivos = "archivos"
+var (
+	rutaArchivos = "archivos"
+	// guardarEnBase: true = los adjuntos nuevos se guardan en la base (ALMACEN_ARCHIVOS=db).
+	guardarEnBase = false
+)
 
-func configurarArchivos(ruta string) error {
+func configurarArchivos(ruta string, enBase bool) error {
+	guardarEnBase = enBase
 	if strings.TrimSpace(ruta) != "" {
 		rutaArchivos = ruta
+	}
+	if enBase {
+		return nil // no hay carpeta que preparar: el disco de la plataforma puede ser de solo lectura
 	}
 	return os.MkdirAll(rutaArchivos, 0o755)
 }
@@ -171,18 +187,36 @@ func guardarAdjunto(t *Tenant, cfg ConfigEmpresa, archivo multipart.File, cabece
 		return Adjunto{}, err
 	}
 
-	ruta, err := rutaDeAdjunto(t.EmpresaID, extension)
-	if err != nil {
-		return Adjunto{}, err
-	}
-	escritos, err := guardarEnDisco(ruta, archivo, maximo)
-	if err != nil {
-		borrarArchivo(ruta)
-		return Adjunto{}, err
-	}
-	if err := verificarImagenLegible(ruta, tipoMime); err != nil {
-		borrarArchivo(ruta)
-		return Adjunto{}, err
+	// Almacén en base: el archivo se lee completo (con tope) y se valida en memoria. Almacén en
+	// disco: se escribe en la carpeta de la empresa y se valida desde ahí.
+	var (
+		ruta      string
+		contenido []byte
+		escritos  int64
+	)
+	if guardarEnBase {
+		contenido, err = leerConTope(archivo, maximo)
+		if err != nil {
+			return Adjunto{}, err
+		}
+		escritos = int64(len(contenido))
+		if err := verificarImagenLegible(bytes.NewReader(contenido), tipoMime); err != nil {
+			return Adjunto{}, err
+		}
+	} else {
+		ruta, err = rutaDeAdjunto(t.EmpresaID, extension)
+		if err != nil {
+			return Adjunto{}, err
+		}
+		escritos, err = guardarEnDisco(ruta, archivo, maximo)
+		if err != nil {
+			borrarArchivo(ruta)
+			return Adjunto{}, err
+		}
+		if err := verificarImagenEnDisco(ruta, tipoMime); err != nil {
+			borrarArchivo(ruta)
+			return Adjunto{}, err
+		}
 	}
 
 	nombre, _ := ValidarTexto(filepath.Base(cabecera.Filename), "nombre", 200)
@@ -194,8 +228,8 @@ func guardarAdjunto(t *Tenant, cfg ConfigEmpresa, archivo multipart.File, cabece
 	}
 	id, err := t.Repo.CrearAdjunto(t.EmpresaID, Adjunto{
 		Entidad: d.Entidad, EntidadID: d.EntidadID, Titulo: d.Titulo, Nombre: nombre, Clase: d.Clase,
-		TipoMime: tipoMime, TamanoBytes: escritos, archivo: ruta, Descripcion: d.Descripcion,
-		SubidoPor: t.Usuario.ID,
+		TipoMime: tipoMime, TamanoBytes: escritos, archivo: ruta, contenido: contenido,
+		Descripcion: d.Descripcion, SubidoPor: t.Usuario.ID,
 	})
 	if err != nil {
 		borrarArchivo(ruta)
@@ -236,6 +270,18 @@ func guardarEnDisco(ruta string, origen multipart.File, maximo int64) (int64, er
 	return escritos, nil
 }
 
+// leerConTope lee el archivo completo en memoria sin pasar de maximo bytes.
+func leerConTope(origen io.Reader, maximo int64) ([]byte, error) {
+	datos, err := io.ReadAll(io.LimitReader(origen, maximo+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(datos)) > maximo {
+		return nil, errRegla("ARCHIVO_DEMASIADO_GRANDE", "El archivo supera el tamaño permitido por su empresa.")
+	}
+	return datos, nil
+}
+
 // hDescargarAdjunto entrega el archivo. Se escribe directo en la respuesta (no pasa por el
 // envoltorio JSON) y solo después de confirmar que pertenece a la empresa de la sesión.
 func (a *App) descargarAdjunto(w http.ResponseWriter, r *http.Request) {
@@ -258,28 +304,36 @@ func (a *App) descargarAdjunto(w http.ResponseWriter, r *http.Request) {
 		escribirError(w, err)
 		return
 	}
-	archivo, err := os.Open(adj.archivo)
+	datos, err := leerAdjunto(adj)
 	if err != nil {
 		escribirError(w, errNoEncontrado("ARCHIVO_NO_DISPONIBLE", "El archivo ya no está disponible."))
 		return
 	}
-	defer archivo.Close()
 	w.Header().Set("Content-Type", adj.TipoMime)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", adj.Nombre))
 	w.Header().Set("Cache-Control", "private, no-store")
-	io.Copy(w, archivo)
+	w.Header().Set("Content-Length", strconv.Itoa(len(datos)))
+	w.Write(datos)
 }
 
-// leerAdjunto devuelve el contenido de un archivo para incrustarlo en un PDF.
+// leerAdjunto devuelve el contenido de un archivo, venga del disco o de la base. Los adjuntos con
+// ruta (almacén en disco, o subidos antes de pasar a la base) se leen del disco; los demás, de
+// adjunto.contenido.
 func leerAdjunto(a Adjunto) ([]byte, error) {
-	return os.ReadFile(a.archivo)
+	if a.archivo != "" {
+		return os.ReadFile(a.archivo)
+	}
+	if a.leerDeBase != nil {
+		return a.leerDeBase()
+	}
+	return nil, errors.New("el adjunto no tiene contenido")
 }
 
 // verificarImagenLegible comprueba que la foto se pueda decodificar de verdad. Un archivo con la
 // cabecera correcta pero el contenido dañado (una subida cortada, por ejemplo) pasa la detección
 // de tipo y recién fallaría al imprimirlo; mejor rechazarlo cuando el usuario todavía está frente
 // a la cámara y puede repetir la toma.
-func verificarImagenLegible(ruta, tipoMime string) error {
+func verificarImagenEnDisco(ruta, tipoMime string) error {
 	if tipoMime != "image/jpeg" && tipoMime != "image/png" {
 		return nil
 	}
@@ -288,9 +342,18 @@ func verificarImagenLegible(ruta, tipoMime string) error {
 		return err
 	}
 	defer f.Close()
+	return verificarImagenLegible(f, tipoMime)
+}
+
+// verificarImagenLegible hace la comprobación sobre cualquier lector: el archivo en disco o los
+// bytes ya leídos en memoria.
+func verificarImagenLegible(r io.Reader, tipoMime string) error {
+	if tipoMime != "image/jpeg" && tipoMime != "image/png" {
+		return nil
+	}
 	// Se decodifica COMPLETA, no solo la cabecera: una subida cortada conserva la cabecera
 	// válida y solo se delata al leer los datos de la imagen.
-	if _, _, err := image.Decode(f); err != nil {
+	if _, _, err := image.Decode(r); err != nil {
 		return errEntrada("IMAGEN_ILEGIBLE",
 			"La foto está dañada o quedó incompleta. Vuelva a tomarla y súbala de nuevo.")
 	}

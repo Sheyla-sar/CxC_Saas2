@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -16,7 +20,7 @@ import (
 
 const (
 	nombreCookieSesion = "sesion"
-	// Duración de plataforma (no de empresa). Reiniciar la app cierra todas las sesiones.
+	// Duración de plataforma (no de empresa). Las sesiones viven en PostgreSQL (tabla sesion).
 	duracionSesion = 12 * time.Hour
 
 	// Límite de intentos fallidos de ingreso (fuerza bruta). De plataforma, no de empresa.
@@ -26,70 +30,96 @@ const (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Limitador de intentos de ingreso (en memoria, como las sesiones)
+// Limitador de intentos de ingreso (en PostgreSQL, tabla intento_ingreso)
 // ─────────────────────────────────────────────────────────────────────────────
 
-type registroFallos struct {
-	cantidad int
-	desde    time.Time
+// Va en la base y no en memoria para que el límite valga aunque la petición caiga en otra
+// instancia (entornos sin estado, como Vercel) y sobreviva a un reinicio.
+
+// tiempoMaximoBase acota cada consulta de sesiones e intentos: si la base no responde, el login
+// falla pronto en lugar de colgar la petición.
+const tiempoMaximoBase = 5 * time.Second
+
+func contextoBase() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), tiempoMaximoBase)
 }
 
 type LimitadorIngreso struct {
-	mu     sync.Mutex
-	fallos map[string]registroFallos
+	db *sql.DB
 }
 
-func nuevoLimitadorIngreso() *LimitadorIngreso {
-	return &LimitadorIngreso{fallos: map[string]registroFallos{}}
+func nuevoLimitadorIngreso(db *sql.DB) *LimitadorIngreso {
+	return &LimitadorIngreso{db: db}
 }
 
 func claveCuenta(slug, email string) string { return "cuenta|" + slug + "|" + email }
 func claveOrigen(ip string) string          { return "origen|" + ip }
 
 // Bloqueado indica si alguna de las claves superó su límite y cuánto falta para reintentar.
+// Si la base no responde devuelve false: sin base tampoco hay login que proteger.
 func (l *LimitadorIngreso) Bloqueado(ahora time.Time, cuenta, origen string) (bool, time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	filas, err := l.db.QueryContext(ctx,
+		`SELECT clave, cantidad, desde FROM intento_ingreso WHERE clave IN ($1, $2)`, cuenta, origen)
+	if err != nil {
+		log.Printf("limitador de ingreso: %v", err)
+		return false, 0
+	}
+	defer filas.Close()
+	maximos := map[string]int{cuenta: maxFallosPorCuenta, origen: maxFallosPorOrigen}
 	var espera time.Duration
-	for clave, maximo := range map[string]int{cuenta: maxFallosPorCuenta, origen: maxFallosPorOrigen} {
-		r, ok := l.fallos[clave]
-		if !ok || ahora.Sub(r.desde) > ventanaIntentos {
+	for filas.Next() {
+		var clave string
+		var cantidad int
+		var desde time.Time
+		if err := filas.Scan(&clave, &cantidad, &desde); err != nil {
+			log.Printf("limitador de ingreso: %v", err)
+			return false, 0
+		}
+		if ahora.Sub(desde) > ventanaIntentos {
 			continue
 		}
-		if r.cantidad >= maximo {
-			espera = max(espera, ventanaIntentos-ahora.Sub(r.desde))
+		if cantidad >= maximos[clave] {
+			espera = max(espera, ventanaIntentos-ahora.Sub(desde))
 		}
 	}
 	return espera > 0, espera
 }
 
 func (l *LimitadorIngreso) RegistrarFallo(ahora time.Time, claves ...string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	vencidos := ahora.Add(-ventanaIntentos)
 	for _, clave := range claves {
-		r, ok := l.fallos[clave]
-		if !ok || ahora.Sub(r.desde) > ventanaIntentos {
-			r = registroFallos{desde: ahora}
+		// Si el registro es de una ventana anterior, empieza de nuevo en 1.
+		_, err := l.db.ExecContext(ctx, `
+			INSERT INTO intento_ingreso (clave, cantidad, desde) VALUES ($1, 1, $2)
+			ON CONFLICT (clave) DO UPDATE SET
+				cantidad = CASE WHEN intento_ingreso.desde < $3 THEN 1 ELSE intento_ingreso.cantidad + 1 END,
+				desde    = CASE WHEN intento_ingreso.desde < $3 THEN $2 ELSE intento_ingreso.desde END`,
+			clave, ahora, vencidos)
+		if err != nil {
+			log.Printf("limitador de ingreso: %v", err)
 		}
-		r.cantidad++
-		l.fallos[clave] = r
 	}
 }
 
 func (l *LimitadorIngreso) Limpiar(clave string) {
-	l.mu.Lock()
-	delete(l.fallos, clave)
-	l.mu.Unlock()
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	if _, err := l.db.ExecContext(ctx, `DELETE FROM intento_ingreso WHERE clave = $1`, clave); err != nil {
+		log.Printf("limitador de ingreso: %v", err)
+	}
 }
 
 // Purgar elimina registros vencidos. Se llama periódicamente desde main.
 func (l *LimitadorIngreso) Purgar(ahora time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for clave, r := range l.fallos {
-		if ahora.Sub(r.desde) > ventanaIntentos {
-			delete(l.fallos, clave)
-		}
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	if _, err := l.db.ExecContext(ctx,
+		`DELETE FROM intento_ingreso WHERE desde < $1`, ahora.Add(-ventanaIntentos)); err != nil {
+		log.Printf("limitador de ingreso: %v", err)
 	}
 }
 
@@ -108,14 +138,20 @@ type Sesion struct {
 	Expira      time.Time
 }
 
-// AlmacenSesiones guarda las sesiones en memoria, protegidas por un mutex. Sin JWT.
+// AlmacenSesiones guarda las sesiones en PostgreSQL (tabla sesion). Sin JWT: el token de la cookie
+// es aleatorio y opaco, y en la base solo queda su SHA-256, así que quien lea la tabla no puede
+// reconstruir una cookie válida.
 type AlmacenSesiones struct {
-	mu       sync.Mutex
-	sesiones map[string]Sesion
+	db *sql.DB
 }
 
-func nuevoAlmacenSesiones() *AlmacenSesiones {
-	return &AlmacenSesiones{sesiones: map[string]Sesion{}}
+func nuevoAlmacenSesiones(db *sql.DB) *AlmacenSesiones {
+	return &AlmacenSesiones{db: db}
+}
+
+func hashDeToken(token string) string {
+	suma := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(suma[:])
 }
 
 func (a *AlmacenSesiones) Crear(usuarioID, empresaID, slug string, ahora time.Time) (Sesion, error) {
@@ -130,40 +166,53 @@ func (a *AlmacenSesiones) Crear(usuarioID, empresaID, slug string, ahora time.Ti
 		EmpresaSlug: slug,
 		Expira:      ahora.Add(duracionSesion),
 	}
-	a.mu.Lock()
-	a.sesiones[s.Token] = s
-	a.mu.Unlock()
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	if _, err := a.db.ExecContext(ctx, `
+		INSERT INTO sesion (token_hash, usuario_id, empresa_ref, empresa_slug, expira)
+		VALUES ($1, $2, $3, $4, $5)`,
+		hashDeToken(s.Token), s.UsuarioID, s.EmpresaID, s.EmpresaSlug, s.Expira); err != nil {
+		return Sesion{}, err
+	}
 	return s, nil
 }
 
 func (a *AlmacenSesiones) Obtener(token string, ahora time.Time) (Sesion, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	s, ok := a.sesiones[token]
-	if !ok {
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	s := Sesion{Token: token}
+	err := a.db.QueryRowContext(ctx, `
+		SELECT usuario_id, empresa_ref, empresa_slug, expira
+		FROM sesion WHERE token_hash = $1`, hashDeToken(token)).
+		Scan(&s.UsuarioID, &s.EmpresaID, &s.EmpresaSlug, &s.Expira)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Sesion{}, false
+	}
+	if err != nil {
+		log.Printf("sesiones: %v", err)
 		return Sesion{}, false
 	}
 	if ahora.After(s.Expira) {
-		delete(a.sesiones, token)
+		a.Eliminar(token)
 		return Sesion{}, false
 	}
 	return s, true
 }
 
 func (a *AlmacenSesiones) Eliminar(token string) {
-	a.mu.Lock()
-	delete(a.sesiones, token)
-	a.mu.Unlock()
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM sesion WHERE token_hash = $1`, hashDeToken(token)); err != nil {
+		log.Printf("sesiones: %v", err)
+	}
 }
 
 // Limpiar elimina las sesiones vencidas. Se llama periódicamente desde main.
 func (a *AlmacenSesiones) Limpiar(ahora time.Time) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for t, s := range a.sesiones {
-		if ahora.After(s.Expira) {
-			delete(a.sesiones, t)
-		}
+	ctx, cancelar := contextoBase()
+	defer cancelar()
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM sesion WHERE expira < $1`, ahora); err != nil {
+		log.Printf("sesiones: %v", err)
 	}
 }
 

@@ -65,7 +65,7 @@ func ejecutarCrearEmpresa(args []string) int {
 	}
 	ctx, cancelar := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelar()
-	db, err := abrirDB(ctx, cfg.DatabaseURL)
+	db, err := abrirDB(ctx, cfg.DatabaseURL, cfg.MaxConexionesDB)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
