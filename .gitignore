@@ -39,3 +39,5 @@ desktop.ini
 
 # Carpeta temporal del alta de la empresa de demostración.
 .alta-empresa.*
+
+.vs/
